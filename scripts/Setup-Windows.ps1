@@ -20,10 +20,12 @@ param(
     [string]$LocalAdminPassword,
     [string]$PasswordFile,   # Path to ACL-restricted temp file (plain or base64). Preferred for wrappers.
     [switch]$AssumeDesktop,
-    [switch]$AssumeLaptop
+    [switch]$AssumeLaptop,
+    [switch]$Simulate   # Run in simulation mode (no real system changes, useful for testing on non-Windows or dry-runs)
 )
 
 $ScriptVersion = '0.1.0'
+$ScriptCommit = '87f0bb9'   # Update this when you commit changes
 $ErrorActionPreference = 'Stop'
 
 #region Helpers
@@ -274,32 +276,53 @@ function Install-AdobeAcrobatReader {
 # top level (runs in both contexts)
 Write-Host "Windows Workstation Pre-AD Setup" -ForegroundColor Magenta
 Write-Host "=================================" -ForegroundColor Magenta
+Write-Host "Version: $ScriptVersion  Commit: $ScriptCommit  Simulate: $Simulate" -ForegroundColor DarkGray
 
-Request-Elevation   # if not admin: builds argList (with -PasswordFile path if supplied, else base64 -LocalAdminPassword), Start-Process -Verb RunAs, exit
+if (-not $Simulate) {
+    Request-Elevation   # if not admin: builds argList (with -PasswordFile path if supplied, else base64 -LocalAdminPassword), Start-Process -Verb RunAs, exit
+}
 
-# === ONLY ELEVATED REACHES HERE ===
+# === ONLY ELEVATED (or Simulate) REACHES HERE ===
 
-$transcriptPath = Join-Path $env:TEMP "WindowsSetup_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-Start-Transcript -Path $transcriptPath -IncludeInvocationHeader
+if ($Simulate) {
+    $transcriptPath = 'SIMULATED-TRANSCRIPT.log'
+    Write-Host "=== SIMULATION MODE ===" -ForegroundColor Yellow
+    Write-Host "No elevation or system changes will be performed." -ForegroundColor Yellow
+} else {
+    $transcriptPath = Join-Path $env:TEMP "WindowsSetup_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    Start-Transcript -Path $transcriptPath -IncludeInvocationHeader
+}
 
 $machineType = 'Unknown'   # default in case of early exit before detection
 
 try {
-    Write-Host "Script Version: $ScriptVersion" -ForegroundColor DarkGray
+    if ($Simulate) {
+        Write-Host "Script Version: $ScriptVersion (Commit $ScriptCommit) [SIMULATED]" -ForegroundColor DarkGray
+        Write-Host "Computer      : SIMULATED-HOST"
+        Write-Host "OS            : Simulated Windows 11 Pro"
+        Write-Host "Manufacturer  : Simulated OEM / Simulated Model"
+        Write-Host "PartOfDomain  : False"
+    } else {
+        Write-Host "Script Version: $ScriptVersion" -ForegroundColor DarkGray
 
-    # Full machine info banner (elevated only)
-    try {
-        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
-        Write-Host "Computer      : $($env:COMPUTERNAME)"
-        Write-Host "OS            : $($os.Caption)"
-        Write-Host "Manufacturer  : $($cs.Manufacturer) / $($cs.Model)"
-        Write-Host "PartOfDomain  : $($cs.PartOfDomain)"
-    } catch {
-        Write-Host "Computer      : $($env:COMPUTERNAME)"
+        # Full machine info banner (elevated only)
+        try {
+            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+            $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+            Write-Host "Computer      : $($env:COMPUTERNAME)"
+            Write-Host "OS            : $($os.Caption)"
+            Write-Host "Manufacturer  : $($cs.Manufacturer) / $($cs.Model)"
+            Write-Host "PartOfDomain  : $($cs.PartOfDomain)"
+        } catch {
+            Write-Host "Computer      : $($env:COMPUTERNAME)"
+        }
     }
 
-    $machineType = Get-MachineType -AssumeDesktop:$AssumeDesktop -AssumeLaptop:$AssumeLaptop
+    if ($Simulate) {
+        $machineType = if ($AssumeLaptop) { 'Laptop' } elseif ($AssumeDesktop) { 'Desktop' } else { 'Desktop' }
+    } else {
+        $machineType = Get-MachineType -AssumeDesktop:$AssumeDesktop -AssumeLaptop:$AssumeLaptop
+    }
     Write-Host "Form Factor   : $machineType (auto-detected)" -ForegroundColor DarkGray
 
     # Execute the 9 steps (each records via Add-Result)
@@ -320,7 +343,9 @@ try {
         Remove-Item -Path $PasswordFile -Force -ErrorAction SilentlyContinue
     }
 
-    Stop-Transcript
+    if (-not $Simulate) {
+        Stop-Transcript
+    }
 
     # Always emit the structured results table + write the persistent report
     Write-Host "`n=================================" -ForegroundColor Magenta
