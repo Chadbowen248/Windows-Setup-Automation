@@ -81,7 +81,7 @@ function Write-Step {
 
 function Write-Success {
     param([string]$Message)
-    Write-Host "    ✓ $Message" -ForegroundColor Green
+    Write-Host "    [OK] $Message" -ForegroundColor Green
 }
 
 function Write-Skip {
