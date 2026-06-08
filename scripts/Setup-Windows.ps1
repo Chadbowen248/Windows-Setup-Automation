@@ -25,7 +25,7 @@ param(
 )
 
 $ScriptVersion = '0.1.0'
-$ScriptCommit = '87f0bb9'   # Update this when you commit changes
+$ScriptCommit = 'b821220'   # Update this when you commit changes
 $ErrorActionPreference = 'Stop'
 
 #region Helpers
@@ -196,7 +196,7 @@ function Set-LocalAdministrator {
 
     # Password source handling (PR1 wiring for $PasswordFile / base64 / prompt)
     $plain = $null
-    if ($PasswordFile -and (Test-Path $PasswordFile)) {
+    if (-not $Simulate -and $PasswordFile -and (Test-Path $PasswordFile)) {
         try {
             $content = Get-Content -Path $PasswordFile -Raw -ErrorAction Stop
             try {
@@ -206,11 +206,14 @@ function Set-LocalAdministrator {
         } finally {
             Remove-Item -Path $PasswordFile -Force -ErrorAction SilentlyContinue
         }
-    } elseif ($LocalAdminPassword) {
+    } elseif (-not $Simulate -and $LocalAdminPassword) {
         try {
             $bytes = [Convert]::FromBase64String($LocalAdminPassword)
             $plain = [System.Text.Encoding]::Unicode.GetString($bytes)
         } catch { $plain = $LocalAdminPassword }
+    } elseif ($Simulate) {
+        # In simulation we never actually read a file or prompt
+        $plain = $null
     }
 
     # Idempotency guard (skip prompt entirely on re-runs if already good)
@@ -352,9 +355,12 @@ try {
     Write-Host "SETUP COMPLETE - SUMMARY REPORT" -ForegroundColor Green
     $script:Results | Format-Table -AutoSize -Wrap | Out-Host
 
-    $reportPath = Join-Path $env:TEMP "WindowsSetupReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-    # Build report using array + join to avoid here-string indentation/terminator issues
-    # (here-strings require the closing @" to be at column 0 with no leading whitespace)
+    if ($Simulate) {
+        $reportPath = ".\WindowsSetupReport-SIMULATED.txt"
+    } else {
+        $reportPath = Join-Path $env:TEMP "WindowsSetupReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    }
+
     $reportLines = @(
         "Windows Pre-AD Workstation Setup Report"
         "Version: $ScriptVersion"
@@ -373,14 +379,21 @@ try {
     )
     $reportContent = $reportLines -join "`r`n"
 
-    try {
-        $reportContent | Out-File -FilePath $reportPath -Encoding UTF8 -Force
-    } catch {
-        Write-Warning "Failed to write persistent report to $reportPath (disk full or permissions?). Summary was still shown on console."
+    if (-not $Simulate) {
+        try {
+            $reportContent | Out-File -FilePath $reportPath -Encoding UTF8 -Force
+        } catch {
+            Write-Warning "Failed to write persistent report to $reportPath (disk full or permissions?). Summary was still shown on console."
+        }
+    } else {
+        # In simulation, just show it on screen instead of writing file
+        Write-Host "(Simulation: report would be written to $reportPath)"
     }
 
     Write-Host "Detailed log   : $transcriptPath"
-    Write-Host "Report artifact: $reportPath"
+    if (-not $Simulate) {
+        Write-Host "Report artifact: $reportPath"
+    }
     Write-Host "Review the summary above. The workstation is now ready for Active Directory join." -ForegroundColor Cyan
 
     # Exit code policy
