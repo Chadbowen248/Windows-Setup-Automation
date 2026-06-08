@@ -15,6 +15,14 @@
     - Idempotency and safe re-runs are goals where practical.
 #>
 
+# ASCII-ONLY RULE (enforced going forward):
+# This script uses only plain ASCII characters in source code, strings,
+# and comments. No Unicode (e.g. no checkmarks, fancy quotes, etc.).
+# Reason: PowerShell 5.1 on Windows is extremely sensitive to file encoding
+# (UTF-8 without BOM, CRLF, etc.). Non-ASCII chars have caused "phantom"
+# parse errors like "string missing the terminator" and cascading brace
+# failures even when the logic was correct. All output uses [OK], - etc.
+
 [CmdletBinding()]
 param(
     [string]$LocalAdminPassword,
@@ -25,7 +33,7 @@ param(
 )
 
 $ScriptVersion = '0.1.0'
-$ScriptCommit = 'b821220'   # Update this when you commit changes
+$ScriptCommit = 'd273b24'   # Update this when you commit changes
 $ErrorActionPreference = 'Stop'
 
 #region Helpers
@@ -164,24 +172,64 @@ function Get-EscapedForArgument {
 
 function Set-UACNeverNotify {
     Write-Step "Setting UAC to Never Notify"
-    # TODO (PR2): real implementation + idempotency check
-    Add-Result 'UAC' 'Placeholder' 'Not yet implemented'
-    Write-Success "UAC set to never notify (placeholder)"
+    if ($Simulate) {
+        Add-Result 'UAC' 'Simulated' 'UAC set to never notify'
+        Write-Success "UAC set to never notify (simulated)"
+        return
+    }
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    $admin = (Get-ItemProperty -Path $key -Name ConsentPromptBehaviorAdmin -ErrorAction SilentlyContinue).ConsentPromptBehaviorAdmin
+    $secure = (Get-ItemProperty -Path $key -Name PromptOnSecureDesktop -ErrorAction SilentlyContinue).PromptOnSecureDesktop
+    if ($admin -eq 0 -and $secure -eq 0) {
+        Write-Skip "UAC already set to never notify"
+        Add-Result 'UAC' 'Skipped' 'Already configured'
+        return
+    }
+    Set-ItemProperty -Path $key -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord
+    Set-ItemProperty -Path $key -Name PromptOnSecureDesktop -Value 0 -Type DWord
+    Add-Result 'UAC' 'Success' 'UAC set to never notify'
+    Write-Success "UAC set to never notify"
 }
 
 function Set-DateTimeAutomatic {
     Write-Step "Configuring Date and Time (automatic + location-based)"
-    # TODO (PR2)
-    Add-Result 'DateTime' 'Placeholder' 'Not yet implemented'
-    Write-Success "Date and Time configured (placeholder)"
+    if ($Simulate) {
+        Add-Result 'DateTime' 'Simulated' 'Date & time set to automatic + location-based'
+        Write-Success "Date and Time configured (simulated)"
+        return
+    }
+    # Time sync
+    Set-Service -Name w32time -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name w32time -ErrorAction SilentlyContinue
+    w32tm /config /update | Out-Null
+    w32tm /resync | Out-Null
+    # Time zone auto + location
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' -Name 'Start' -Value 3 -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' -Name 'Value' -Value 'Allow' -Force -ErrorAction SilentlyContinue
+    Add-Result 'DateTime' 'Success' 'Date & time set to automatic + location-based'
+    Write-Success "Date and Time configured"
 }
 
 function Set-PowerPlan {
     param([string]$MachineType)
     Write-Step "Configuring Power Plan for $MachineType"
-    # TODO (PR2): real powercfg /change + correct matrix
-    Add-Result 'PowerPlan' 'Placeholder' "MachineType=$MachineType (not yet implemented)"
-    Write-Success "Power plan updated (placeholder)"
+    if ($Simulate) {
+        Add-Result 'PowerPlan' 'Simulated' "Power plan for $MachineType (simulated)"
+        Write-Success "Power plan updated (simulated)"
+        return
+    }
+    if ($MachineType -eq 'Desktop') {
+        powercfg /change monitor-timeout-ac 60 | Out-Null
+        powercfg /change standby-timeout-ac 0 | Out-Null
+    } else {
+        # Laptop: battery vs plugged
+        powercfg /change monitor-timeout-dc 15 | Out-Null
+        powercfg /change standby-timeout-dc 20 | Out-Null
+        powercfg /change monitor-timeout-ac 15 | Out-Null
+        powercfg /change standby-timeout-ac 0 | Out-Null
+    }
+    Add-Result 'PowerPlan' 'Success' "Power plan configured for $MachineType"
+    Write-Success "Power plan updated"
 }
 
 function Set-LocalAdministrator {
@@ -229,47 +277,159 @@ function Set-LocalAdministrator {
         $secure = Read-Host -Prompt "Enter password for local Administrator account" -AsSecureString
     }
 
-    # TODO (PR2): actual account changes using SID where possible
-    # if (-not $admin.Enabled) { Enable-LocalUser -SID $admin.SID }
-    # Set-LocalUser -SID $admin.SID -Password $secure -PasswordNeverExpires $true
+    if (-not $admin.Enabled) {
+        Enable-LocalUser -SID $admin.SID
+    }
+    Set-LocalUser -SID $admin.SID -Password $secure -PasswordNeverExpires $true
 
-    Add-Result 'LocalAdmin' 'Placeholder' "Password handling wired (SID helper + sources + guard). Real Enable/Set in PR2."
-    Write-Success "Local Administrator (password handling demonstrated)"
+    Add-Result 'LocalAdmin' 'Success' "Administrator account ($($admin.Name)) enabled + password set + never expires"
+    Write-Success "Local Administrator configured"
 }
 
 function Enable-RemoteDesktop {
     Write-Step "Enabling Remote Desktop"
-    # TODO (PR2)
-    Add-Result 'RemoteDesktop' 'Placeholder' 'Not yet implemented'
-    Write-Success "Remote Desktop enabled (placeholder)"
+    if ($Simulate) {
+        Add-Result 'RemoteDesktop' 'Simulated' 'Remote Desktop enabled (simulated)'
+        Write-Success "Remote Desktop enabled (simulated)"
+        return
+    }
+    $tsKey = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+    $rdpKey = "$tsKey\WinStations\RDP-Tcp"
+    $deny = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
+    $nla = (Get-ItemProperty -Path $rdpKey -Name UserAuthentication -ErrorAction SilentlyContinue).UserAuthentication
+    if ($deny -eq 0 -and $nla -eq 1) {
+        Write-Skip "Remote Desktop already enabled with NLA"
+        Add-Result 'RemoteDesktop' 'Skipped' 'Already configured'
+        return
+    }
+    Set-ItemProperty -Path $tsKey -Name fDenyTSConnections -Value 0
+    Set-ItemProperty -Path $rdpKey -Name UserAuthentication -Value 1
+    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+    Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name TermService -ErrorAction SilentlyContinue
+    Add-Result 'RemoteDesktop' 'Success' 'Remote Desktop enabled with NLA'
+    Write-Success "Remote Desktop enabled"
 }
 
 function Uninstall-DellOptimizer {
     Write-Step "Checking for and uninstalling Dell Optimizer"
-    # TODO (PR3)
-    Add-Result 'DellOptimizer' 'Placeholder' 'Not yet implemented'
-    Write-Success "Dell Optimizer handled (placeholder)"
+    if ($Simulate) {
+        Add-Result 'DellOptimizer' 'Simulated' 'Dell Optimizer uninstalled (simulated)'
+        Write-Success "Dell Optimizer handled (simulated)"
+        return
+    }
+    $mfr = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Manufacturer
+    if ($mfr -notmatch 'Dell') {
+        Write-Skip "Not a Dell machine"
+        Add-Result 'DellOptimizer' 'Skipped' 'Not a Dell machine'
+        return
+    }
+    # Stop services
+    Get-Service -Name '*DellOptimizer*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+    # Try Get-Package first
+    $pkg = Get-Package -Name '*Dell*Optimizer*' -ErrorAction SilentlyContinue
+    if ($pkg) {
+        $pkg | Uninstall-Package -Force -ErrorAction SilentlyContinue | Out-Null
+        Add-Result 'DellOptimizer' 'Success' 'Dell Optimizer uninstalled via Get-Package'
+        Write-Success "Dell Optimizer uninstalled"
+        return
+    }
+    # Fallback: registry uninstall strings
+    $uninst = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+        Get-ItemProperty | Where-Object { $_.DisplayName -like '*Dell*Optimizer*' -and $_.UninstallString }
+    if ($uninst) {
+        foreach ($u in $uninst) {
+            $cmd = $u.UninstallString
+            if ($cmd -match 'msiexec') {
+                $cmd += ' /qn /norestart'
+            } else {
+                $cmd += ' /remove /silent'
+            }
+            cmd /c $cmd | Out-Null
+        }
+        Add-Result 'DellOptimizer' 'Success' 'Dell Optimizer uninstalled via registry'
+        Write-Success "Dell Optimizer uninstalled"
+        return
+    }
+    Write-Skip "Dell Optimizer not present"
+    Add-Result 'DellOptimizer' 'Skipped' 'Not present'
 }
 
 function Uninstall-NonEnglishOffice {
     Write-Step "Removing non-English Office 365 installations"
-    # TODO (PR3)
-    Add-Result 'OfficeLanguages' 'Placeholder' 'Not yet implemented'
-    Write-Success "Non-English Office versions removed (placeholder)"
+    if ($Simulate) {
+        Add-Result 'OfficeLanguages' 'Simulated' 'Non-English Office removed (simulated)'
+        Write-Success "Non-English Office versions removed (simulated)"
+        return
+    }
+    $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    $c2r = Get-ChildItem $keys -ErrorAction SilentlyContinue | Get-ItemProperty |
+        Where-Object {
+            $_.DisplayName -match 'Microsoft (365|Office|Office 16|M365)' -and
+            $_.DisplayName -match ' - [a-z]{2}-[a-z]{2}' -and
+            $_.DisplayName -notmatch '- ?en-us' -and
+            $_.UninstallString
+        }
+    if (-not $c2r) {
+        Write-Skip "No non-English Office language packs found"
+        Add-Result 'OfficeLanguages' 'Skipped' 'None found'
+        return
+    }
+    $removed = @()
+    foreach ($entry in $c2r) {
+        $cmd = $entry.UninstallString
+        if ($cmd -match 'msiexec') {
+            $cmd += ' /qn /norestart'
+        } else {
+            $cmd += ' /quiet /norestart'
+        }
+        cmd /c $cmd | Out-Null
+        $removed += $entry.DisplayName
+    }
+    Add-Result 'OfficeLanguages' 'Success' "Removed: $($removed -join '; ')"
+    Write-Success "Non-English Office versions removed"
 }
 
 function Install-Chrome {
     Write-Step "Installing Google Chrome"
-    # TODO (PR4)
-    Add-Result 'Chrome' 'Placeholder' 'Not yet implemented'
-    Write-Success "Chrome installed (placeholder)"
+    if ($Simulate) {
+        Add-Result 'Chrome' 'Simulated' 'Google Chrome installed (simulated)'
+        Write-Success "Chrome installed (simulated)"
+        return
+    }
+    # Idempotency check
+    $present = winget list --id Google.Chrome --accept-source-agreements 2>$null
+    if ($present -match 'Google.Chrome') {
+        Write-Skip "Google Chrome already installed"
+        Add-Result 'Chrome' 'Skipped' 'Already present'
+        return
+    }
+    # Best-effort source update (non-fatal)
+    winget source update --accept-source-agreements | Out-Null
+    winget install --id Google.Chrome -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+    Add-Result 'Chrome' 'Success' 'Google Chrome installed'
+    Write-Success "Chrome installed"
 }
 
 function Install-AdobeAcrobatReader {
     Write-Step "Installing Adobe Acrobat Reader"
-    # TODO (PR4)
-    Add-Result 'AcrobatReader' 'Placeholder' 'Not yet implemented'
-    Write-Success "Adobe Acrobat Reader installed (placeholder)"
+    if ($Simulate) {
+        Add-Result 'AcrobatReader' 'Simulated' 'Adobe Acrobat Reader installed (simulated)'
+        Write-Success "Adobe Acrobat Reader installed (simulated)"
+        return
+    }
+    $id = 'Adobe.Acrobat.Reader.64-bit'
+    $present = winget list --id $id --accept-source-agreements 2>$null
+    if ($present -match $id) {
+        Write-Skip "Adobe Acrobat Reader already installed"
+        Add-Result 'AcrobatReader' 'Skipped' 'Already present'
+        return
+    }
+    winget source update --accept-source-agreements | Out-Null
+    winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+    Add-Result 'AcrobatReader' 'Success' 'Adobe Acrobat Reader installed'
+    Write-Success "Adobe Acrobat Reader installed"
 }
 
 #endregion
@@ -357,26 +517,37 @@ try {
 
     if ($Simulate) {
         $reportPath = ".\WindowsSetupReport-SIMULATED.txt"
+        $reportLines = @(
+            "Windows Pre-AD Workstation Setup Report (SIMULATED)"
+            "Version: $ScriptVersion"
+            "Computer: SIMULATED-HOST"
+            "Form Factor (detected): $machineType"
+            "Transcript: $transcriptPath"
+            ""
+            "=== RESULTS (simulated) ==="
+            "$($script:Results | Format-Table -AutoSize | Out-String)"
+            ""
+            "Next step: Review above. (No changes were made.)"
+        )
     } else {
         $reportPath = Join-Path $env:TEMP "WindowsSetupReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+        $reportLines = @(
+            "Windows Pre-AD Workstation Setup Report"
+            "Version: $ScriptVersion"
+            "Timestamp: $(Get-Date -Format o)"
+            "Computer: $env:COMPUTERNAME"
+            "OS: $((Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption)"
+            "Manufacturer/Model: $((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Manufacturer) / $((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Model)"
+            "Form Factor (detected): $machineType"
+            "PartOfDomain: $((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).PartOfDomain)"
+            "Transcript: $transcriptPath"
+            ""
+            "=== RESULTS ==="
+            "$($script:Results | Format-Table -AutoSize | Out-String)"
+            ""
+            "Next step: Review above. Workstation is ready for Active Directory join (unless Failed entries above)."
+        )
     }
-
-    $reportLines = @(
-        "Windows Pre-AD Workstation Setup Report"
-        "Version: $ScriptVersion"
-        "Timestamp: $(Get-Date -Format o)"
-        "Computer: $env:COMPUTERNAME"
-        "OS: $((Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption)"
-        "Manufacturer/Model: $((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Manufacturer) / $((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Model)"
-        "Form Factor (detected): $machineType"
-        "PartOfDomain: $((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).PartOfDomain)"
-        "Transcript: $transcriptPath"
-        ""
-        "=== RESULTS ==="
-        "$($script:Results | Format-Table -AutoSize | Out-String)"
-        ""
-        "Next step: Review above. Workstation is ready for Active Directory join (unless Failed entries above)."
-    )
     $reportContent = $reportLines -join "`r`n"
 
     if (-not $Simulate) {
