@@ -63,6 +63,8 @@ function Request-Elevation {
     # Forward non-sensitive switches
     if ($AssumeDesktop) { $argList += '-AssumeDesktop' }
     if ($AssumeLaptop)  { $argList += '-AssumeLaptop' }
+    if ($PauseOnExit)   { $argList += '-PauseOnExit' }
+    if ($Simulate)      { $argList += '-Simulate' }
 
     # Password passthrough (two paths):
     # 1. $PasswordFile (preferred for wrappers): only the *path* is passed.
