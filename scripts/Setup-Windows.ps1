@@ -247,13 +247,18 @@ function Set-LocalAdministrator {
 
     # Auto-discover pw.txt in the same directory as the script (for simple USB/drop-and-run use).
     # This is a fallback only. Explicit -LocalAdminPassword or -PasswordFile take precedence.
-    # File should contain the plain-text password (one line, will be trimmed).
+    # The pw.txt file may contain comments (lines starting with #); the first non-empty, non-comment line is used as the plain-text password.
     if (-not $LocalAdminPassword -and -not $PasswordFile) {
         $pwFile = Join-Path $PSScriptRoot 'pw.txt'
         if (Test-Path $pwFile -PathType Leaf) {
-            $LocalAdminPassword = (Get-Content -Path $pwFile -Raw -ErrorAction SilentlyContinue).Trim()
-            if ($LocalAdminPassword) {
-                Write-Host "Using password from pw.txt (same directory as script)" -ForegroundColor Yellow
+            $lines = Get-Content -Path $pwFile -ErrorAction SilentlyContinue
+            foreach ($line in $lines) {
+                $trimmed = $line.Trim()
+                if ($trimmed -and -not $trimmed.StartsWith('#')) {
+                    $LocalAdminPassword = $trimmed
+                    Write-Host "Using password from pw.txt (same directory as script)" -ForegroundColor Yellow
+                    break
+                }
             }
         }
     }
@@ -277,10 +282,22 @@ function Set-LocalAdministrator {
         $passwordSourceProvided = $true
     } elseif ($LocalAdminPassword) {
         if (-not $Simulate) {
+            # Smart detection: try base64 (for internal elevation forwarding), verify by re-encoding.
+            # If it matches re-encode or decode fails, treat as plain text (from direct param or pw.txt).
             try {
                 $bytes = [Convert]::FromBase64String($LocalAdminPassword)
-                $plain = [System.Text.Encoding]::Unicode.GetString($bytes)
-            } catch { $plain = $LocalAdminPassword }
+                $decoded = [System.Text.Encoding]::Unicode.GetString($bytes)
+                $reencoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($decoded))
+                if ($reencoded -eq $LocalAdminPassword) {
+                    $plain = $decoded
+                } else {
+                    $plain = $LocalAdminPassword
+                }
+            } catch {
+                $plain = $LocalAdminPassword
+            }
+        } else {
+            $plain = $null
         }
         $passwordSourceProvided = $true
     }
