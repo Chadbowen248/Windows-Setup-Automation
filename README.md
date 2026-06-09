@@ -71,7 +71,9 @@ The script will:
 
 **ASCII-only source**: The entire script uses only plain ASCII. This avoids PowerShell 5.1 parser/encoding gotchas on Windows (non-ASCII characters like checkmarks have caused "phantom" string-terminator and brace errors in the past).
 
-See `docs/design.md` for the full original PR plan, security notes (password handling, transcripts), and implementation details.
+See [docs/USAGE.md](docs/USAGE.md) for detailed usage instructions, parameters, examples (including secure password handling and -Simulate), troubleshooting, and verification steps.
+
+See `docs/design.md` for the full original PR plan, security notes, and implementation details.
 
 ## Notes
 
