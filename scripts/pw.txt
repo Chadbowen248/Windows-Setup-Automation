@@ -1,0 +1,13 @@
+# Windows-Setup-Automation - Local Administrator Password
+#
+# Put the desired password for the built-in "Administrator" account
+# on the line below this comment (plain text, one line only).
+#
+# Example:
+# MySuperSecretP@ssw0rd123!
+#
+# IMPORTANT:
+# - This file is in .gitignore so it should never be committed with a real password.
+# - After use, you can delete this file or leave it (it will be ignored by git).
+# - For security, do not leave real passwords on shared drives long-term.
+

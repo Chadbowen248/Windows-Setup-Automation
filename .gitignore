@@ -1,0 +1,14 @@
+# Windows-Setup-Automation ignores
+
+# Password file - do not commit real passwords
+scripts/pw.txt
+
+# Common temp / log files
+*.log
+*.tmp
+WindowsSetupReport_*.txt
+WindowsSetup_*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
