@@ -29,7 +29,8 @@ param(
     [string]$PasswordFile,   # Path to ACL-restricted temp file (plain or base64). Preferred for wrappers.
     [switch]$AssumeDesktop,
     [switch]$AssumeLaptop,
-    [switch]$Simulate   # Run in simulation mode (no real system changes, useful for testing on non-Windows or dry-runs)
+    [switch]$Simulate,       # Run in simulation mode (no real system changes, useful for testing on non-Windows or dry-runs)
+    [switch]$PauseOnExit     # Pause (wait for key) before exiting. Automatically passed by the .cmd launcher.
 )
 
 $ScriptVersion = '0.1.0'
@@ -242,30 +243,48 @@ function Set-LocalAdministrator {
         return
     }
 
-    # Password source handling (PR1 wiring for $PasswordFile / base64 / prompt)
-    $plain = $null
-    if (-not $Simulate -and $PasswordFile -and (Test-Path $PasswordFile)) {
-        try {
-            $content = Get-Content -Path $PasswordFile -Raw -ErrorAction Stop
-            try {
-                $bytes = [Convert]::FromBase64String($content.Trim())
-                $plain = [System.Text.Encoding]::Unicode.GetString($bytes)
-            } catch { $plain = $content.Trim() }
-        } finally {
-            Remove-Item -Path $PasswordFile -Force -ErrorAction SilentlyContinue
+    # Auto-discover pw.txt in the same directory as the script (for simple USB/drop-and-run use).
+    # This is a fallback only. Explicit -LocalAdminPassword or -PasswordFile take precedence.
+    # File should contain the plain-text password (one line, will be trimmed).
+    if (-not $LocalAdminPassword -and -not $PasswordFile) {
+        $pwFile = Join-Path $PSScriptRoot 'pw.txt'
+        if (Test-Path $pwFile -PathType Leaf) {
+            $LocalAdminPassword = (Get-Content -Path $pwFile -Raw -ErrorAction SilentlyContinue).Trim()
+            if ($LocalAdminPassword) {
+                Write-Host "Using password from pw.txt (same directory as script)" -ForegroundColor Yellow
+            }
         }
-    } elseif (-not $Simulate -and $LocalAdminPassword) {
-        try {
-            $bytes = [Convert]::FromBase64String($LocalAdminPassword)
-            $plain = [System.Text.Encoding]::Unicode.GetString($bytes)
-        } catch { $plain = $LocalAdminPassword }
-    } elseif ($Simulate) {
-        # In simulation we never actually read a file or prompt
-        $plain = $null
     }
 
-    # Idempotency guard (skip prompt entirely on re-runs if already good)
-    if ($admin.Enabled -and $admin.PasswordNeverExpires -and -not $plain) {
+    # Password source handling
+    $plain = $null
+    $passwordSourceProvided = $false
+
+    if ($PasswordFile -and (Test-Path $PasswordFile)) {
+        if (-not $Simulate) {
+            try {
+                $content = Get-Content -Path $PasswordFile -Raw -ErrorAction Stop
+                try {
+                    $bytes = [Convert]::FromBase64String($content.Trim())
+                    $plain = [System.Text.Encoding]::Unicode.GetString($bytes)
+                } catch { $plain = $content.Trim() }
+            } finally {
+                Remove-Item -Path $PasswordFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $passwordSourceProvided = $true
+    } elseif ($LocalAdminPassword) {
+        if (-not $Simulate) {
+            try {
+                $bytes = [Convert]::FromBase64String($LocalAdminPassword)
+                $plain = [System.Text.Encoding]::Unicode.GetString($bytes)
+            } catch { $plain = $LocalAdminPassword }
+        }
+        $passwordSourceProvided = $true
+    }
+
+    # Idempotency guard (skip prompt entirely on re-runs if already good, and no password source was provided)
+    if ($admin.Enabled -and $admin.PasswordNeverExpires -and -not $passwordSourceProvided) {
         Write-Skip "Local Administrator ($($admin.Name)) already enabled with PasswordNeverExpires=true"
         Add-Result 'LocalAdmin' 'Skipped' 'Account already in desired state'
         return
@@ -273,17 +292,25 @@ function Set-LocalAdministrator {
 
     if ($plain) {
         $secure = ConvertTo-SecureString $plain -AsPlainText -Force
-    } else {
+    } elseif (-not $Simulate) {
         $secure = Read-Host -Prompt "Enter password for local Administrator account" -AsSecureString
+    } else {
+        # In simulation with no password source: use a dummy so we exercise the "set" path for testing
+        $secure = ConvertTo-SecureString 'SimulatedP@ssw0rd123!' -AsPlainText -Force
     }
 
-    if (-not $admin.Enabled) {
-        Enable-LocalUser -SID $admin.SID
-    }
-    Set-LocalUser -SID $admin.SID -Password $secure -PasswordNeverExpires $true
+    if (-not $Simulate) {
+        if (-not $admin.Enabled) {
+            Enable-LocalUser -SID $admin.SID
+        }
+        Set-LocalUser -SID $admin.SID -Password $secure -PasswordNeverExpires $true
 
-    Add-Result 'LocalAdmin' 'Success' "Administrator account ($($admin.Name)) enabled + password set + never expires"
-    Write-Success "Local Administrator configured"
+        Add-Result 'LocalAdmin' 'Success' "Administrator account ($($admin.Name)) enabled + password set + never expires"
+        Write-Success "Local Administrator configured"
+    } else {
+        Add-Result 'LocalAdmin' 'Simulated' "Would configure local admin (password source provided: $passwordSourceProvided)"
+        Write-Success "Local Administrator (simulated)"
+    }
 }
 
 function Enable-RemoteDesktop {
@@ -566,6 +593,10 @@ try {
         Write-Host "Report artifact: $reportPath"
     }
     Write-Host "Review the summary above. The workstation is now ready for Active Directory join." -ForegroundColor Cyan
+
+    if ($PauseOnExit -and -not $Simulate) {
+        Read-Host "`nPress Enter to close this window..."
+    }
 
     # Exit code policy
     $failedCount = ($script:Results | Where-Object Status -eq 'Failed').Count

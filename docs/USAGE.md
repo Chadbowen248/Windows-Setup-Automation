@@ -67,22 +67,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup-Windows.ps1
 | `-PasswordFile`        | String   | Path to a file containing the password (plain text or base64). Preferred for automation/wrappers. | `-PasswordFile C:\temp\adminpw.txt` |
 | `-AssumeDesktop`       | Switch   | Force desktop power plan settings.                                          | `-AssumeDesktop` |
 | `-AssumeLaptop`        | Switch   | Force laptop power plan settings.                                           | `-AssumeLaptop` |
+| `-PauseOnExit`         | Switch   | Pause (wait for keypress) before the console closes. Automatically passed by `Setup-Windows.cmd`. | (usually not passed manually) |
 
 ### Password Handling (Important for Security)
 
-**Best practice for interactive use**:
-- Just run the script. It will prompt (after elevation) only if the local Administrator account is not already in the desired state.
+The script supports several ways to provide the local Administrator password. Explicit parameters always take precedence.
+
+**Supported methods (in order of precedence):**
+
+1. `-LocalAdminPassword "P@ssw0rd123"` — provide directly on the command line (visible in process list / some logs).
+2. `-PasswordFile "C:\path\to\file.txt"` — read the password from a file (recommended for automation and shared use). The file can contain plain text or base64.
+3. Auto-discovery of `pw.txt` — if neither of the above is supplied, the script looks for a file named `pw.txt` in the **same directory as the script** (i.e. next to `Setup-Windows.ps1`). If found, the first line (trimmed) is used as the plain-text password. A yellow message will indicate it was used.
+
+Example for auto `pw.txt` (great for USB "drop and run"):
+- Place a file called `pw.txt` in the same folder as `Setup-Windows.ps1` (or the `.cmd`).
+- Just run `Setup-Windows.cmd` with no password arguments.
+- The script will print something like: `Using password from pw.txt (same directory as script)`
+
+**Best practice for interactive technician use**:
+- Just run via the `.cmd`. It will only prompt (after elevation) if the local Administrator account is not already in the desired state (thanks to the idempotency guard).
 
 **For wrappers / automation / scripting** (recommended):
 ```cmd
 Setup-Windows.cmd -PasswordFile C:\temp\adminpw.txt
 ```
 
-The `-PasswordFile` method is preferred because:
-- The actual password never appears in the command line.
-- It never appears in the transcript header on the launching process.
+The `-PasswordFile` method is preferred for automation because the password never appears on the command line or in the transcript header of the launching process.
 
-You can create the password file like this (on a secure machine):
+You can create a password file like this (on a secure machine):
 
 ```powershell
 # Create a temp file with tight ACLs
@@ -91,6 +103,8 @@ $tmp = New-TemporaryFile
 # Restrict permissions (example)
 icacls $tmp.FullName /inheritance:r /grant:r "Administrators:F" "YourUser:F"
 ```
+
+**Note**: `pw.txt` auto-discovery is intentionally limited to the script's own directory for safety and simplicity. It is a convenience for USB/imaging scenarios, not a replacement for explicit parameters in automated environments.
 
 ## Common Usage Examples
 
@@ -105,6 +119,7 @@ Setup-Windows.cmd
 - The script self-elevates.
 - It will ask for the local Administrator password (only once, unless already configured).
 - Walk away. Come back to a clean report.
+- The console window will automatically pause at the end (waiting for a key press) so you can review the summary. This pause only happens when launched via the `.cmd` launcher (not when you call the `.ps1` directly from another PowerShell session, and never in `-Simulate` mode).
 
 ### 2. Dry-run / testing (on any machine, including this one)
 
