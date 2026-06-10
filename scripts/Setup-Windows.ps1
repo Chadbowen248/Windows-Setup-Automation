@@ -33,8 +33,8 @@ param(
     [switch]$PauseOnExit     # Pause (wait for key) before exiting. Automatically passed by the .cmd launcher.
 )
 
-$ScriptVersion = '0.1.0'
-$ScriptCommit = 'd273b24'   # Update this when you commit changes
+$ScriptVersion = '0.1.1'
+$ScriptCommit = 'd141f91'   # Update this when you commit changes
 $ErrorActionPreference = 'Stop'
 
 #region Helpers
@@ -109,7 +109,7 @@ $script:Results = [System.Collections.Generic.List[pscustomobject]]::new()
 function Add-Result {
     param(
         [string]$Step,
-        [ValidateSet('Success','Skipped','Failed','Warning')][string]$Status,
+        [ValidateSet('Success','Skipped','Failed','Warning','Simulated')][string]$Status,
         [string]$Details
     )
     $script:Results.Add([pscustomobject]@{
@@ -167,6 +167,22 @@ function Get-EscapedForArgument {
     # Note: base64 encoded values are already safe (no &), but we still quote them.
     $Value = $Value -replace '&', '^&'
     return $Value
+}
+
+# Robust helper for cmd.exe /c execution. Replaces every bare "cmd /c ..." in Dell/Office
+# (and considered for winget paths). Uses Start-Process 'cmd.exe' /c ... -Wait -PassThru
+# so we get reliable real ExitCode from .ExitCode (bare cmd /c in PS does not always
+# propagate $LASTEXITCODE correctly under elevation, transcripts, or certain PS hosts
+# on real hardware). This is the root cause of false "Success"/"handled" reports when
+# the actual uninstall command did nothing observable.
+# Smallest single helper, pure ASCII, follows existing indent/style, placed with
+# other foundation helpers. All Simulate/early-Skip paths untouched.
+function Invoke-Cmd {
+    param([string]$CommandLine)
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return 1 }
+    $p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $CommandLine -Wait -PassThru -WindowStyle Hidden
+    if (-not $p) { return 1 }
+    return $p.ExitCode
 }
 
 #endregion
@@ -237,6 +253,11 @@ function Set-PowerPlan {
 
 function Set-LocalAdministrator {
     Write-Step "Configuring Local Administrator Account"
+    if ($Simulate) {
+        Add-Result 'LocalAdmin' 'Simulated' 'Local Administrator configured (simulated)'
+        Write-Success "Local Administrator (simulated)"
+        return
+    }
 
     $admin = Get-BuiltInAdministrator
     if (-not $admin) {
@@ -370,35 +391,84 @@ function Uninstall-DellOptimizer {
         Add-Result 'DellOptimizer' 'Skipped' 'Not a Dell machine'
         return
     }
-    # Stop services
-    Get-Service -Name '*DellOptimizer*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
-    # Try Get-Package first
-    $pkg = Get-Package -Name '*Dell*Optimizer*' -ErrorAction SilentlyContinue
+    # Stop services first (common blocker per community reports)
+    Get-Service -Name '*DellOptimizer*','*Dell*Optimizer*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+
+    # Pre-discovery for diagnostics (what the tech will see in report)
+    $foundPkgs = @(Get-Package -Name '*Dell*Optimizer*','*Optimizer*Service*' -ErrorAction SilentlyContinue)
+    $foundReg = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+        Get-ItemProperty | Where-Object { ($_.DisplayName -like '*Dell*Optimizer*' -or $_.DisplayName -like '*Optimizer*Service*') -and ($_.UninstallString -or $_.QuietUninstallString) })
+    # Broaden exe discovery (InstallShield info can live under PF or PF(x86))
+    $dellExe = $null
+    foreach ($base in @('C:\Program Files (x86)\InstallShield Installation Information', 'C:\Program Files\InstallShield Installation Information')) {
+        $dellExe = Get-ChildItem $base -Recurse -Filter '*DellOptimizer*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($dellExe) { break }
+    }
+    $preList = @()
+    if ($foundPkgs) { $preList += ($foundPkgs | ForEach-Object { $_.Name }) }
+    if ($foundReg)  { $preList += ($foundReg | ForEach-Object { $_.DisplayName }) }
+    if ($dellExe)   { $preList += "exe:$($dellExe.FullName)" }
+    if ($preList) {
+        Write-Host "    Found Dell bloat candidates: $($preList -join ' | ')" -ForegroundColor Yellow
+    }
+
+    $actionTaken = $false
+    $details = @()
+    # Prefer official Dell uninstaller if we can find it (Dell docs: DellOptimizer.exe /remove  or variants with -silent)
+    if ($dellExe) {
+        $cmd = "`"$($dellExe.FullName)`" /remove /silent"
+        $ec = Invoke-Cmd $cmd
+        $actionTaken = $true
+        $details += "Ran exe: $cmd (exit: $ec)"
+    }
+    # Try Get-Package (multiple name patterns)
+    $pkg = Get-Package -Name '*Dell*Optimizer*','*Optimizer*Service*' -ErrorAction SilentlyContinue
     if ($pkg) {
         $pkg | Uninstall-Package -Force -ErrorAction SilentlyContinue | Out-Null
-        Add-Result 'DellOptimizer' 'Success' 'Dell Optimizer uninstalled via Get-Package'
-        Write-Success "Dell Optimizer uninstalled"
-        return
+        $actionTaken = $true
+        $details += "Uninstalled via Get-Package"
     }
-    # Fallback: registry uninstall strings
+    # Fallback / additional: registry uninstall strings (both hives)
     $uninst = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
-        Get-ItemProperty | Where-Object { $_.DisplayName -like '*Dell*Optimizer*' -and $_.UninstallString }
+        Get-ItemProperty | Where-Object { ($_.DisplayName -like '*Dell*Optimizer*' -or $_.DisplayName -like '*Optimizer*Service*') -and ($_.UninstallString -or $_.QuietUninstallString) }
     if ($uninst) {
         foreach ($u in $uninst) {
-            $cmd = $u.UninstallString
+            $cmd = if ($u.QuietUninstallString -and $u.QuietUninstallString.Trim()) { $u.QuietUninstallString } else { $u.UninstallString }
             if ($cmd -match 'msiexec') {
                 $cmd += ' /qn /norestart'
             } else {
                 $cmd += ' /remove /silent'
             }
-            cmd /c $cmd | Out-Null
+            $ec = Invoke-Cmd $cmd
+            $actionTaken = $true
+            $details += "Ran reg: $cmd (exit: $ec)"
         }
-        Add-Result 'DellOptimizer' 'Success' 'Dell Optimizer uninstalled via registry'
-        Write-Success "Dell Optimizer uninstalled"
-        return
     }
-    Write-Skip "Dell Optimizer not present"
-    Add-Result 'DellOptimizer' 'Skipped' 'Not present'
+
+    # Verify after actions - combined signals (Get-Package is not always authoritative for all Dell installers)
+    $stillPkg = Get-Package -Name '*Dell*Optimizer*','*Optimizer*Service*' -ErrorAction SilentlyContinue
+    $stillReg = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+        Get-ItemProperty | Where-Object { ($_.DisplayName -like '*Dell*Optimizer*' -or $_.DisplayName -like '*Optimizer*Service*') -and ($_.UninstallString -or $_.QuietUninstallString) }
+    # Broaden still-exe check too (same folders)
+    $stillExe = $null
+    foreach ($base in @('C:\Program Files (x86)\InstallShield Installation Information', 'C:\Program Files\InstallShield Installation Information')) {
+        $stillExe = Get-ChildItem $base -Recurse -Filter '*DellOptimizer*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($stillExe) { break }
+    }
+    $stillPresent = ($stillPkg -or $stillReg -or $stillExe)
+
+    if (-not $stillPresent) {
+        if ($actionTaken) {
+            Add-Result 'DellOptimizer' 'Success' "Dell Optimizer uninstalled. Pre: $($preList -join ' | '). Details: $($details -join '; ')"
+            Write-Success "Dell Optimizer uninstalled"
+        } else {
+            Write-Skip "Dell Optimizer not present"
+            Add-Result 'DellOptimizer' 'Skipped' 'Not present'
+        }
+    } else {
+        Add-Result 'DellOptimizer' 'Failed' "Uninstall attempted but Optimizer still detected after. Pre: $($preList -join ' | '). Tried: $($details -join '; '). Manual removal via Apps & features or Dell support may be needed."
+        Write-Warning "Dell Optimizer uninstall attempted but still present - check report for details."
+    }
 }
 
 function Uninstall-NonEnglishOffice {
@@ -410,31 +480,99 @@ function Uninstall-NonEnglishOffice {
     }
     $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
             'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+
+    # Research note (Get Help path):
+    # Using Get Help > Uninstall (Office troubleshooter) launches the SaRA / GetHelpCmd.exe -S OfficeScrubScenario.
+    # That performs a comprehensive full removal of detected Office (services, files, registry, etc.).
+    # It is NOT language-selective by default. To mimic "that level of clean" while KEEPING en-us:
+    #   - Preferred supported way: Office Deployment Tool (ODT) + config.xml with <Remove> specifying only the
+    #     unwanted <Language ID="fr-fr" /> etc. (requires small official download of setup.exe).
+    #   - This in-box function does the closest zero-download approximation: target the per-language ARP entries
+    #     that appear on OEM/Dell preloads (e.g. "Microsoft 365 Apps ... - fr-fr") via their UninstallString.
+    #   - If this is insufficient on a given image, the final report will say Failed and recommend the Get Help
+    #     troubleshooter (full scrub) or ODT remove-languages. The en-us base should remain untouched because we
+    #     explicitly exclude entries containing en-us.
+
+    # Get Help fidelity change: use QuietUninstallString pref + Invoke-Cmd helper (real ec) +
+    # best-effort Stop-Service for ClickToRun* (Dell copy style) before loop + ec==0 AND post-re-scan
+    # clean for Success decision. Re-scan always. Attempted final cmds surfaced in Details for
+    # correlation with what "Get Help" actually invoked. en-us exclusion is absolute (early return).
+    # Filter broadened to catch Quiet-only entries + all lang bloat user sees (M365 -xx, Loc Component (xx),
+    # Language Pack, etc). Leaves en-us/core untouched and functional. Matches observable end state of
+    # Get Help > Uninstall Office for the extra non-en language items on real Dell test hardware.
+
+    # Broad match for C2R language entries and localization bloat.
+    # Covers: "Microsoft 365 Apps for enterprise - fr-fr", "(fr-fr)", "fr-fr", Language Packs, and
+    # common "Office 16 Click-to-Run Localization Component" (non-en) entries.
+    # en-us/English core exclusion is absolute (never remove).
     $c2r = Get-ChildItem $keys -ErrorAction SilentlyContinue | Get-ItemProperty |
         Where-Object {
-            $_.DisplayName -match 'Microsoft (365|Office|Office 16|M365)' -and
-            $_.DisplayName -match ' - [a-z]{2}-[a-z]{2}' -and
-            $_.DisplayName -notmatch '- ?en-us' -and
-            $_.UninstallString
+            $name = $_.DisplayName
+            if (-not $name) { return $false }
+            if ($name -match 'en-us') { return $false }
+            $isOffice = ($name -match 'Microsoft (365|Office|M365|Office 16|Office Language Pack|Click-to-Run Localization)')
+            # Any locale tag that is not en-us (handles " - xx-xx", "(xx-xx)", " xx-xx ", etc.)
+            $hasNonEnLocale = ($name -match '[^a-z]([a-z]{2}-[a-z]{2})[^a-z]') -and ($name -notmatch 'en-us')
+            # Also catch bare localization components even without obvious locale in the name (common bloat)
+            $isLocalizationBloat = ($name -like '*Click-to-Run Localization Component*') -and ($name -notmatch 'en-us')
+            ($isOffice -and ($hasNonEnLocale -or $isLocalizationBloat)) -and (($_.UninstallString -and $_.UninstallString.Trim()) -or ($_.QuietUninstallString -and $_.QuietUninstallString.Trim()))
         }
     if (-not $c2r) {
-        Write-Skip "No non-English Office language packs found"
+        Write-Skip "No non-English Office language packs or localization bloat found"
         Add-Result 'OfficeLanguages' 'Skipped' 'None found'
         return
     }
+
+    # Log exactly what we are targeting (critical visibility for the technician)
+    $targets = $c2r | ForEach-Object { $_.DisplayName }
+    Write-Host "    Targeting non-English Office entries: $($targets -join ' | ')" -ForegroundColor Yellow
+
+    # Best-effort stop of ClickToRun services (common blockers for C2R lang uninstalls).
+    # Copy exact style from DellOptimizer service stop above.
+    Get-Service -Name 'ClickToRunSvc','*ClickToRun*','*OfficeClickToRun*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+
     $removed = @()
+    $attempted = @()
+    $ecs = @()
     foreach ($entry in $c2r) {
-        $cmd = $entry.UninstallString
+        $cmd = if ($entry.QuietUninstallString -and $entry.QuietUninstallString.Trim()) { $entry.QuietUninstallString } else { $entry.UninstallString }
         if ($cmd -match 'msiexec') {
             $cmd += ' /qn /norestart'
         } else {
+            # C2R entries (ClickToRun) typically accept /quiet or the raw string as-is from ARP
             $cmd += ' /quiet /norestart'
         }
-        cmd /c $cmd | Out-Null
-        $removed += $entry.DisplayName
+        $attempted += $cmd
+        $ec = Invoke-Cmd $cmd
+        $ecs += $ec
+        if ($ec -eq 0) {
+            $removed += $entry.DisplayName
+        }
     }
-    Add-Result 'OfficeLanguages' 'Success' "Removed: $($removed -join '; ')"
-    Write-Success "Non-English Office versions removed"
+
+    # Verify: always re-scan (use same filter for clean decision; could use slightly broader for warning only)
+    # Success only when post-re-scan shows clean AND all ecs were 0 (per Get Help fidelity contract).
+    $c2rAfter = Get-ChildItem $keys -ErrorAction SilentlyContinue | Get-ItemProperty |
+        Where-Object {
+            $name = $_.DisplayName
+            if (-not $name) { return $false }
+            if ($name -match 'en-us') { return $false }
+            $isOffice = ($name -match 'Microsoft (365|Office|M365|Office 16|Office Language Pack|Click-to-Run Localization)')
+            $hasNonEnLocale = ($name -match '[^a-z]([a-z]{2}-[a-z]{2})[^a-z]') -and ($name -notmatch 'en-us')
+            $isLocalizationBloat = ($name -like '*Click-to-Run Localization Component*') -and ($name -notmatch 'en-us')
+            ($isOffice -and ($hasNonEnLocale -or $isLocalizationBloat)) -and (($_.UninstallString -and $_.UninstallString.Trim()) -or ($_.QuietUninstallString -and $_.QuietUninstallString.Trim()))
+        }
+
+    $allEcsGood = ($ecs.Count -eq 0) -or (-not ($ecs -ne 0))
+    if (-not $c2rAfter -and $allEcsGood) {
+        Add-Result 'OfficeLanguages' 'Success' "Removed non-English Office entries (registry/C2R uninstall strings). Targeted: $($targets -join '; '). Removed: $($removed -join '; '). Attempted cmds: $($attempted -join '; ')"
+        Write-Success "Non-English Office versions removed (best-effort in-box; mimics Get Help language cleanup while keeping en-us)"
+    } else {
+        $remaining = $c2rAfter | ForEach-Object { $_.DisplayName }
+        $ecSummary = if ($ecs) { "ecs: $($ecs -join ','). " } else { "" }
+        Add-Result 'OfficeLanguages' 'Failed' "${ecSummary}Some non-English Office may remain. Remaining: $($remaining -join ', '). Targeted before: $($targets -join '; '). Tried: $($attempted -join '; '). Use Get Help app (Office uninstall troubleshooter) for full scrub or ODT for explicit language remove while preserving en-us."
+        Write-Warning "Office language removal attempted but some may remain - check report for details and consider Get Help or ODT."
+    }
 }
 
 function Install-Chrome {
@@ -451,11 +589,23 @@ function Install-Chrome {
         Add-Result 'Chrome' 'Skipped' 'Already present'
         return
     }
-    # Best-effort source update (non-fatal)
-    winget source update --accept-source-agreements | Out-Null
-    winget install --id Google.Chrome -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
-    Add-Result 'Chrome' 'Success' 'Google Chrome installed'
-    Write-Success "Chrome installed"
+    # Best-effort source update (non-fatal). Use assignment (not | Out-Null) then LASTEXITCODE.
+    $null = winget source update --accept-source-agreements 2>&1
+    $srcExit = $LASTEXITCODE
+    # Install line followed by real $LASTEXITCODE capture + re-query presence for truthful Success.
+    # Never unconditional Success after | Out-Null. Only Success + Write-Success when package
+    # actually present afterward (re-query is the contract). $installExit checked (considered).
+    $installOutput = winget install --id Google.Chrome -e --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+    $installExit = $LASTEXITCODE
+    # Post-action verification: the only reliable signal is actual presence after
+    $presentAfter = winget list --id Google.Chrome --accept-source-agreements 2>$null
+    if ($presentAfter -match 'Google.Chrome') {
+        Add-Result 'Chrome' 'Success' "Google Chrome installed (srcExit: $srcExit, installExit: $installExit)"
+        Write-Success "Chrome installed"
+    } else {
+        Add-Result 'Chrome' 'Failed' "winget install attempted but Chrome not detected after. Exit: $installExit. Output tail: $(($installOutput -split "`n" | Select-Object -Last 5) -join "`n")"
+        Write-Warning "Chrome install may have failed - see report details (winget source, network, or policy can interfere on fresh images)."
+    }
 }
 
 function Install-AdobeAcrobatReader {
@@ -472,10 +622,22 @@ function Install-AdobeAcrobatReader {
         Add-Result 'AcrobatReader' 'Skipped' 'Already present'
         return
     }
-    winget source update --accept-source-agreements | Out-Null
-    winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
-    Add-Result 'AcrobatReader' 'Success' 'Adobe Acrobat Reader installed'
-    Write-Success "Adobe Acrobat Reader installed"
+    # Best-effort source update (non-fatal). Use assignment (not | Out-Null) then LASTEXITCODE.
+    $null = winget source update --accept-source-agreements 2>&1
+    $srcExit = $LASTEXITCODE
+    # Install line followed by real $LASTEXITCODE capture + re-query presence for truthful Success.
+    # Never unconditional Success after | Out-Null. Only Success + Write-Success when package
+    # actually present afterward (re-query is the contract). $installExit checked (considered).
+    $installOutput = winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+    $installExit = $LASTEXITCODE
+    $presentAfter = winget list --id $id --accept-source-agreements 2>$null
+    if ($presentAfter -match $id) {
+        Add-Result 'AcrobatReader' 'Success' "Adobe Acrobat Reader installed (srcExit: $srcExit, installExit: $installExit)"
+        Write-Success "Adobe Acrobat Reader installed"
+    } else {
+        Add-Result 'AcrobatReader' 'Failed' "winget install attempted but Reader not detected after. Exit: $installExit. Output tail: $(($installOutput -split "`n" | Select-Object -Last 5) -join "`n")"
+        Write-Warning "Acrobat Reader install may have failed - see report details."
+    }
 }
 
 #endregion
@@ -534,16 +696,19 @@ try {
     }
     Write-Host "Form Factor   : $machineType (auto-detected)" -ForegroundColor DarkGray
 
-    # Execute the 9 steps (each records via Add-Result)
-    Set-UACNeverNotify
-    Set-DateTimeAutomatic
-    Set-PowerPlan -MachineType $machineType
-    Set-LocalAdministrator
-    Enable-RemoteDesktop
-    Uninstall-DellOptimizer
-    Uninstall-NonEnglishOffice
-    Install-Chrome
-    Install-AdobeAcrobatReader
+    # Execute the 9 steps (each records via Add-Result). Wrapped individually in
+    # try/catch so one step's failure (e.g. Office uninstall) never skips later
+    # steps (installs) or leaves the results report incomplete. Each catch adds
+    # a truthful Failed result. Internal Simulate guards + early Skips preserved.
+    try { Set-UACNeverNotify } catch { Add-Result 'UAC' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Set-DateTimeAutomatic } catch { Add-Result 'DateTime' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Set-PowerPlan -MachineType $machineType } catch { Add-Result 'PowerPlan' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Set-LocalAdministrator } catch { Add-Result 'LocalAdmin' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Enable-RemoteDesktop } catch { Add-Result 'RemoteDesktop' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Uninstall-DellOptimizer } catch { Add-Result 'DellOptimizer' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Uninstall-NonEnglishOffice } catch { Add-Result 'OfficeLanguages' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Install-Chrome } catch { Add-Result 'Chrome' 'Failed' "Step threw: $($_.Exception.Message)" }
+    try { Install-AdobeAcrobatReader } catch { Add-Result 'AcrobatReader' 'Failed' "Step threw: $($_.Exception.Message)" }
 
 } finally {
     # Guaranteed cleanup for any password material (even on exceptions/Ctrl-C)

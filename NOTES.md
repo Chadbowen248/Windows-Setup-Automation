@@ -60,3 +60,41 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/Setup-Windows.ps1 -Simulat
 
 Current source parses/runs clean here. The "phantom" errors only repro on files containing the old here-string.
 
+## 2026-06 real-hardware test findings + fixes (Dell/Office/Installs)
+User test on actual pre-AD Dell/Win11 Pro image:
+- Dell Optimizer: NOT removed (script said success or skipped overall).
+- Non-EN Office 365: NOT removed (multiple language variants from OEM preload remained).
+- Chrome + Adobe Acrobat Reader: NOT installed.
+- Script overall reported success (exit 0, green messages).
+
+Root causes identified:
+- Install-Chrome / Install-AdobeAcrobatReader did `winget ... | Out-Null` then unconditionally Add-Result 'Success'. No post-presence re-check, no $LASTEXITCODE inspection, no output capture. winget can fail (source not ready on fresh image, network, policy, ID variant) with no signal to the results table.
+- Dell/Office had post-verification (good), but:
+  - Dell discovery (exact InstallShield *DellOptimizer*.exe, Get-Package name patterns, reg -like '*Dell*Optimizer*') + service stop was not broad enough for the variant on that hardware.
+  - Office regex was too strict (' - [a-z]{2}-[a-z]{2}' with spaces + specific product words). Real OEM entries use varying formats: " - fr-fr", "(fr-fr)", locale in parens, or appear as "Click-to-Run Localization Component" without the exact pattern. C2R ARP uninstall strings also need careful handling; raw append /quiet does not always equal the full scrub.
+- "It said it was successful": overall report + lack of Failed on the install steps + possible Skipped on bloat (no matches) made it look clean. The per-step table would have shown the truth if more Faileds had been emitted.
+
+Research on "Get Help feature in Windows and choose Uninstall Windows..." (user reference for Office):
+- The relevant flow is Get Help app -> Office uninstall troubleshooter (or direct aka.ms/SaRA-officeUninstallFromPC). This launches the Microsoft Support and Recovery Assistant (SaRA) / command-line GetHelpCmd.exe -S OfficeScrubScenario -AcceptEula.
+- It automates a comprehensive "remove any version of Office" (services, files, registry keys, Click-to-Run state, etc.). See Microsoft docs: "Office uninstall with the command line version of Get Help".
+- It is a full scrub of the detected Office install(s). Not inherently "remove only non-en languages".
+- To achieve the desired "that thorough clean but leave en-us": 
+  - Use Office Deployment Tool (ODT) with a configuration.xml containing a targeted <Remove All="FALSE"><Product ID="O365ProPlusRetail"><Language ID="fr-fr" /><Language ID="es-es"/>...</Product></Remove>. This is the supported way to drop specific installed languages while preserving the base + en-us.
+  - Or full scrub (Get Help / OffScrub) then reinstall English-only via company M365 / ODT add with only en-us.
+- The script's in-box registry + UninstallString approach (chosen in original design to honor "built-in only, zero friction, no mandatory downloads") is a best-effort approximation that targets the per-language ARP entries common on Dell/OEM images. It will never be as thorough as the SaRA scrub for deeply embedded C2R state.
+
+Actions taken (targeted hardening, no new full design cycle needed; this completes/polishes the area scoped in design.md PR3 "Dell + non-English Office" and PR4 "winget installs"):
+- Added mandatory post-action verification + output/exit capture for both winget installs. Success only if the package ID is present in `winget list` afterward. Failures now emit Failed + tail of output + guidance.
+- DellOptimizer: broader service/package/reg patterns (added *Optimizer*Service*), pre-discovery logging of exact candidates found, combined post-presence check (pkg OR reg OR exe still present), capture of command output tails in Details.
+- NonEnglishOffice: significantly loosened locale detection (any xx-xx not containing en-us, plus explicit "Click-to-Run Localization Component" bloat), pre-removal logging of the exact DisplayNames being targeted (so next real test shows "Targeting: ..."), expanded comments with the Get Help research + why ODT is the "real" thorough path, kept the verification re-scan and Failed path.
+- All changes stay ASCII-only. -Simulate still runs cleanly (early return in sim branches for those steps; real paths exercised on Windows).
+
+Next real test at work should now:
+- Show exactly what bloat candidates were discovered before any action.
+- Truthfully report Failed (with details) for any install or removal that did not change the post-state.
+- Give better clues in the report if C2R language entries need the Get Help full scrub or ODT instead.
+
+If after next test the registry method is still insufficient for their specific preload images, we can add an optional thorough mode (download ODT to temp + generate remove-languages config for all but en-us) behind a switch, while keeping the current no-download path as default.
+
+All original requirements + the "report truth, not fake success" goal are now better served.
+
