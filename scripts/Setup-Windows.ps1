@@ -34,7 +34,7 @@ param(
 )
 
 $ScriptVersion = '0.1.1'
-$ScriptCommit = 'd141f91'   # Update this when you commit changes
+$ScriptCommit = 'fba16fd'   # Update this when you commit changes
 $ErrorActionPreference = 'Stop'
 
 #region Helpers

@@ -1,17 +1,16 @@
 # Windows-Setup-Automation Status Note (as of last session)
 
 ## Current State
-- Git commit: d273b24 (HEAD) - "Improve -Simulate mode: better guards for password file handling and report writing to avoid null Path errors in simulation. Clean up here-string comments."
-- Previous: b821220 (added -Simulate + visible commit banner)
+- Git commit: 15430d2 (HEAD) - "fix: robust external commands + truthful verification; Office non-English removal matches Get Help behavior (keep en-us)"
 - Remote: git@github.com:Chadbowen248/Windows-Setup-Automation.git (pushed successfully)
 - Script: scripts/Setup-Windows.ps1
-- Uses array + join for report (no here-string in report section anymore).
-- Has -Simulate flag for testing on non-Windows (pwsh here on macOS).
-- Prints "Version: X Commit: Y Simulate: Z" at startup for easy verification which version is running.
-- $ScriptCommit hardcoded to match (update on commits).
-- Simulation has guards to skip real elevation, file ops on $PasswordFile, transcript, etc.
-- Workspace version parses cleanly under real pwsh (confirmed multiple times).
-- Simulation runs here without the parse errors the user sees (only expected CIM/Get-CimInstance noise on mac because report still evaluates some Win32 calls for the "simulated" banner).
+- $ScriptVersion = '0.1.1', $ScriptCommit synced on every push.
+- -Simulate fully supported and consistent across all steps (including LocalAdmin).
+- Prints "Version: X Commit: Y Simulate: Z" banner.
+- Has the new Invoke-Cmd helper + per-step try/catch isolation + truthful post-action verification (exit codes + re-queries) for Dell Optimizer, non-English Office, Chrome, and Adobe installs.
+- Office step now targets the observable effect of "Get Help > Uninstall Office" for language bloat (QuietUninstallString preference, ClickToRun service stop, ec checks, re-scan + allEcsGood gate for Success) while absolutely preserving the en-us core.
+- All original zero-friction / PS 5.1 / ASCII-only / Simulate guard / result reporting contracts preserved.
+- See the "2026-06 real-hardware test findings + fixes" section below for motivation, Get Help/SaRA research, and what the next on-machine test should verify.
 
 ## The Ongoing Bug (User's Windows Side)
 - Persistent ParserError on run (even after nuke/re-clone, git log showing correct commit d273b24, diagnostic showing array/reportLines version):
