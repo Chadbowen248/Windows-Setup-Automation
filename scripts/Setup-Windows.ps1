@@ -34,7 +34,7 @@ param(
 )
 
 $ScriptVersion = '0.1.1'
-$ScriptCommit = 'office-c2r-fix'   # Update this when you commit changes
+$ScriptCommit = 'bf33bbc'   # Update this when you commit changes
 $ErrorActionPreference = 'Stop'
 
 #region Helpers
