@@ -472,7 +472,7 @@ function Uninstall-DellOptimizer {
 }
 
 function Uninstall-NonEnglishOffice {
-    Write-Step "Removing non-English Office 365 installations"
+    Write-Step "Removing non-English Microsoft 365 / Office / OneNote language packs"
     if ($Simulate) {
         Add-Result 'OfficeLanguages' 'Simulated' 'Non-English Office removed (simulated)'
         Write-Success "Non-English Office versions removed (simulated)"
@@ -488,8 +488,9 @@ function Uninstall-NonEnglishOffice {
     #   - Preferred supported way: Office Deployment Tool (ODT) + config.xml with <Remove> specifying only the
     #     unwanted <Language ID="fr-fr" /> etc. (requires small official download of setup.exe).
     #   - This in-box function does the closest zero-download approximation: target the per-language ARP entries
-    #     that appear on OEM/Dell preloads (e.g. "Microsoft 365 - es-es", "Microsoft 365 - fr-fr", "Microsoft 365 - pt-br")
-    #     by directly driving the same OfficeClickToRun.exe mechanism the UI and Get Help per-item uninstalls use.
+    #     that appear on OEM/Dell preloads (e.g. "Microsoft 365 - es-es", "Microsoft 365 - fr-fr", "Microsoft 365 - pt-br",
+    #     and "Microsoft OneNote - fr-fr" etc.) by directly driving the same OfficeClickToRun.exe mechanism the UI
+    #     and Get Help per-item uninstalls use.
     #   - If this is insufficient on a given image, the final report will say Failed and recommend the Get Help
     #     troubleshooter (full scrub via OfficeScrubScenario) or ODT remove-languages. The en-us base should remain
     #     untouched because we explicitly exclude entries containing en-us.
@@ -497,18 +498,20 @@ function Uninstall-NonEnglishOffice {
     # Fidelity to the Get Help / Apps & features removal of the exact language bloat entries:
     # - Kill Office/ClickToRun processes (they hold locks).
     # - Stop ClickToRun* services.
-    # - For "Microsoft 365 - xx-xx" (and Localization Component) ARP entries: extract productstoremove from the
-    #   machine's own registration (this captures the exact O365HomePremRetail.16_xx-xx_x-none etc. for this image),
-    #   then invoke the canonical OfficeClickToRun.exe directly with scenario=install ... productstoremove=...
-    #   displaylevel=false forceappshutdown=true . This is the invocation pattern used by successful community
-    #   scripts and what the Get Help flow ultimately exercises for those visible per-language entries.
+    # - For "Microsoft 365 - xx-xx" (and "Microsoft OneNote - xx-xx", Localization Component) ARP entries:
+    #   extract productstoremove from the machine's own registration (this captures the exact ..._xx-xx_x-none
+    #   etc. for this image), then invoke the canonical OfficeClickToRun.exe directly with scenario=install ...
+    #   productstoremove=... displaylevel=false forceappshutdown=true . This is the invocation pattern used by
+    #   successful community scripts and what the Get Help flow ultimately exercises for those visible per-language
+    #   entries (including separate OneNote languages).
     # - Use direct Start-Process (not cmd /c string) for the C2R exe so we get reliable EC and avoid quoting issues.
     # - Prefer QuietUninstallString. Fallback to other uninstallers via Invoke-Cmd for non-C2R.
     # - Always re-scan after. Success requires zero remaining non-en matches + good ecs.
     # - en-us exclusion is absolute (multiple guards + early filter). Leaves English/core functional.
 
     # Broad match for C2R language entries and localization bloat.
-    # Covers the exact user-reported forms: "Microsoft 365 - es-es", "Microsoft 365 - fr-fr", "Microsoft 365 - pt-br"
+    # Covers the exact user-reported forms: "Microsoft 365 - es-es", "Microsoft 365 - fr-fr", "Microsoft 365 - pt-br",
+    # "Microsoft OneNote es-es", "Microsoft OneNote - fr-fr", "Microsoft OneNote - pt-br"
     # plus " - fr-fr", "(fr-fr)", Language Packs, and "Office 16 Click-to-Run Localization Component" (non-en).
     # en-us/English core exclusion is absolute (never remove).
     $c2r = Get-ChildItem $keys -ErrorAction SilentlyContinue | Get-ItemProperty |
@@ -516,9 +519,9 @@ function Uninstall-NonEnglishOffice {
             $name = $_.DisplayName
             if (-not $name) { return $false }
             if ($name -match 'en-us') { return $false }
-            $isOffice = ($name -match 'Microsoft (365|Office|M365|Office 16|Office Language Pack|Click-to-Run Localization)')
+            $isOffice = ($name -match 'Microsoft (365|Office|M365|Office 16|Office Language Pack|Click-to-Run Localization|OneNote)')
             # Any locale tag that is not en-us. Handles exact forms user sees in appwiz.cpl.
-            $hasNonEnLocale = ($name -match 'Microsoft 365 - [a-z]{2}-[a-z]{2}' -or
+            $hasNonEnLocale = ($name -match 'Microsoft (365|OneNote) - [a-z]{2}-[a-z]{2}' -or
                                $name -match ' - [a-z]{2}-[a-z]{2}' -or
                                $name -match '\([a-z]{2}-[a-z]{2}\)' -or
                                $name -match ' [a-z]{2}-[a-z]{2}(\s|$|\))') -and ($name -notmatch 'en-us')
@@ -527,14 +530,14 @@ function Uninstall-NonEnglishOffice {
             ($isOffice -and ($hasNonEnLocale -or $isLocalizationBloat)) -and (($_.UninstallString -and $_.UninstallString.Trim()) -or ($_.QuietUninstallString -and $_.QuietUninstallString.Trim()))
         }
     if (-not $c2r) {
-        Write-Skip "No non-English Office language packs or localization bloat found"
+        Write-Skip "No non-English Office/OneNote language packs or localization bloat found"
         Add-Result 'OfficeLanguages' 'Skipped' 'None found'
         return
     }
 
     # Log exactly what we are targeting (critical visibility for the technician and for debugging "still present")
     $targets = $c2r | ForEach-Object { $_.DisplayName }
-    Write-Host "    Targeting non-English Office entries: $($targets -join ' | ')" -ForegroundColor Yellow
+    Write-Host "    Targeting non-English Office/OneNote entries: $($targets -join ' | ')" -ForegroundColor Yellow
 
     # Kill common Office/ClickToRun processes first (they frequently block C2R language removals).
     # This step is part of what makes Get Help / manual per-entry uninstalls succeed where naive string runs fail.
@@ -633,8 +636,8 @@ function Uninstall-NonEnglishOffice {
             $name = $_.DisplayName
             if (-not $name) { return $false }
             if ($name -match 'en-us') { return $false }
-            $isOffice = ($name -match 'Microsoft (365|Office|M365|Office 16|Office Language Pack|Click-to-Run Localization)')
-            $hasNonEnLocale = ($name -match 'Microsoft 365 - [a-z]{2}-[a-z]{2}' -or
+            $isOffice = ($name -match 'Microsoft (365|Office|M365|Office 16|Office Language Pack|Click-to-Run Localization|OneNote)')
+            $hasNonEnLocale = ($name -match 'Microsoft (365|OneNote) - [a-z]{2}-[a-z]{2}' -or
                                $name -match ' - [a-z]{2}-[a-z]{2}' -or
                                $name -match '\([a-z]{2}-[a-z]{2}\)' -or
                                $name -match ' [a-z]{2}-[a-z]{2}(\s|$|\))') -and ($name -notmatch 'en-us')
@@ -644,12 +647,12 @@ function Uninstall-NonEnglishOffice {
 
     $allEcsGood = ($ecs.Count -eq 0) -or (-not ($ecs -ne 0))
     if (-not $c2rAfter -and $allEcsGood) {
-        Add-Result 'OfficeLanguages' 'Success' "Removed non-English Office entries (C2R direct + registry). Targeted: $($targets -join '; '). Removed: $($removed -join '; '). Attempted: $($attempted -join '; ')"
-        Write-Success "Non-English Office versions removed (direct C2R invocation matching Get Help per-language behavior; en-us preserved)"
+        Add-Result 'OfficeLanguages' 'Success' "Removed non-English Office/OneNote entries (C2R direct + registry). Targeted: $($targets -join '; '). Removed: $($removed -join '; '). Attempted: $($attempted -join '; ')"
+        Write-Success "Non-English Office/OneNote versions removed (direct C2R invocation matching Get Help per-language behavior; en-us preserved)"
     } else {
         $remaining = $c2rAfter | ForEach-Object { $_.DisplayName }
         $ecSummary = if ($ecs) { "ecs: $($ecs -join ','). " } else { "" }
-        Add-Result 'OfficeLanguages' 'Failed' "${ecSummary}Some non-English Office may remain. Remaining: $($remaining -join ', '). Targeted before: $($targets -join '; '). Tried: $($attempted -join '; '). Use Get Help app (Office uninstall troubleshooter) for full scrub or ODT for explicit language remove while preserving en-us."
+        Add-Result 'OfficeLanguages' 'Failed' "${ecSummary}Some non-English Office/OneNote may remain. Remaining: $($remaining -join ', '). Targeted before: $($targets -join '; '). Tried: $($attempted -join '; '). Use Get Help app (Office uninstall troubleshooter) for full scrub or ODT for explicit language remove while preserving en-us."
         Write-Warning "Office language removal attempted but some may remain - check report for details and consider Get Help or ODT."
     }
 }
