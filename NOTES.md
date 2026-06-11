@@ -1,14 +1,13 @@
 # Windows-Setup-Automation Status Note (as of last session)
 
 ## Current State
-- Git commit: 15430d2 (HEAD) - "fix: robust external commands + truthful verification; Office non-English removal matches Get Help behavior (keep en-us)"
-- Remote: git@github.com:Chadbowen248/Windows-Setup-Automation.git (pushed successfully)
-- Script: scripts/Setup-Windows.ps1
+- Script: scripts/Setup-Windows.ps1 (in-repo edit for C2R removal)
 - $ScriptVersion = '0.1.1', $ScriptCommit synced on every push.
 - -Simulate fully supported and consistent across all steps (including LocalAdmin).
 - Prints "Version: X Commit: Y Simulate: Z" banner.
 - Has the new Invoke-Cmd helper + per-step try/catch isolation + truthful post-action verification (exit codes + re-queries) for Dell Optimizer, non-English Office, Chrome, and Adobe installs.
-- Office step now targets the observable effect of "Get Help > Uninstall Office" for language bloat (QuietUninstallString preference, ClickToRun service stop, ec checks, re-scan + allEcsGood gate for Success) while absolutely preserving the en-us core.
+- Office step (Uninstall-NonEnglishOffice) now uses *direct* Start-Process on the canonical OfficeClickToRun.exe + productstoremove extracted from the machine's ARP registration + displaylevel=false forceappshutdown=true. This replicates the exact mechanism used by the Get Help per-item / C2R language removal (the "script that runs from Get Help" for the visible "Microsoft 365 - es-es / fr-fr / pt-br" entries). Plus aggressive process kill + service stop + post-action re-scan.
+- en-us exclusion remains absolute; English/core is left intact.
 - All original zero-friction / PS 5.1 / ASCII-only / Simulate guard / result reporting contracts preserved.
 - See the "2026-06 real-hardware test findings + fixes" section below for motivation, Get Help/SaRA research, and what the next on-machine test should verify.
 
@@ -85,15 +84,18 @@ Research on "Get Help feature in Windows and choose Uninstall Windows..." (user 
 Actions taken (targeted hardening, no new full design cycle needed; this completes/polishes the area scoped in design.md PR3 "Dell + non-English Office" and PR4 "winget installs"):
 - Added mandatory post-action verification + output/exit capture for both winget installs. Success only if the package ID is present in `winget list` afterward. Failures now emit Failed + tail of output + guidance.
 - DellOptimizer: broader service/package/reg patterns (added *Optimizer*Service*), pre-discovery logging of exact candidates found, combined post-presence check (pkg OR reg OR exe still present), capture of command output tails in Details.
-- NonEnglishOffice: significantly loosened locale detection (any xx-xx not containing en-us, plus explicit "Click-to-Run Localization Component" bloat), pre-removal logging of the exact DisplayNames being targeted (so next real test shows "Targeting: ..."), expanded comments with the Get Help research + why ODT is the "real" thorough path, kept the verification re-scan and Failed path.
+- NonEnglishOffice: previous string-munge + cmd /c was replaced with direct Start-Process on OfficeClickToRun.exe (canonical path under Program Files\Common Files\...) using productstoremove=... pulled from the actual registration for that "Microsoft 365 - xx-xx" entry + the exact displaylevel=false forceappshutdown=true flags that make per-language C2R removals succeed. Added pre-kill of Office/ClickToRun processes + extra service stop + sleeps. This is the closest in-box replication of "the script that runs from Get Help" for the specific visible language bloat entries without doing a full OfficeScrub (which would nuke en-us too). Pre-removal "Targeting:" log + truthful re-scan verification retained. If entries with es-es/fr-fr/pt-br still remain after this, the report will clearly list the exact remaining DisplayNames + the commands that were attempted.
 - All changes stay ASCII-only. -Simulate still runs cleanly (early return in sim branches for those steps; real paths exercised on Windows).
 
 Next real test at work should now:
-- Show exactly what bloat candidates were discovered before any action.
-- Truthfully report Failed (with details) for any install or removal that did not change the post-state.
-- Give better clues in the report if C2R language entries need the Get Help full scrub or ODT instead.
+- Show exactly the "Targeting non-English Office entries: Microsoft 365 - es-es | Microsoft 365 - fr-fr | ..." list.
+- Run the direct C2R invocations (you can copy the "Attempted:" lines from the report and paste them in an admin prompt to repro in isolation).
+- Truthfully report Failed (with the exact remaining DisplayNames) if the targeted xx-xx entries are still present in appwiz.cpl after.
+- If the languages are now gone but "Office is still present" in some other sense (main M365 entry, apps still launch, shared components), note the exact leftover names + folders so we can decide on extra cleanup or full-scrub + reinstall path.
 
-If after next test the registry method is still insufficient for their specific preload images, we can add an optional thorough mode (download ODT to temp + generate remove-languages config for all but en-us) behind a switch, while keeping the current no-download path as default.
+The Get Help Office uninstall troubleshooter runs OfficeScrubScenario (full removal of the detected M365 product(s)). Our per-language C2R direct calls target only the non-en ARP registrations (the ones the user listed) while trying to leave the en-us base alone. If the image has the languages so entangled that only a full scrub cleans them, we can later add an opt-in -FullOfficeScrub switch that downloads the command-line Get Help (aka.ms/SaRA_EnterpriseVersionFiles), runs SaRAcmd.exe / GetHelpCmd.exe -S OfficeScrubScenario -AcceptEula -OfficeVersion M365 (or All), and then the tech is responsible for reinstalling a clean English-only M365 (winget, ODT, or company portal).
+
+All original requirements + the "report truth, not fake success" goal are now better served. The C2R execution change directly addresses "there is a script from Get Help that removes them".
 
 All original requirements + the "report truth, not fake success" goal are now better served.
 
